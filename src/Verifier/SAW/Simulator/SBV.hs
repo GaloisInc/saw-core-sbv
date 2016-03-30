@@ -25,6 +25,7 @@ module Verifier.SAW.Simulator.SBV
   , SValue
   , Labeler(..)
   , sbvCodeGen
+  , sbvCodeGenLLVM
   , toWord
   , toBool
   , module Verifier.SAW.Simulator.SBV.SWord
@@ -924,10 +925,10 @@ newCodeGenVars (FTRec tm) = do
   return (vRecord <$> traverse (fmap ready) vals)
 
 cgInputSWord :: String -> Int -> SBVCodeGen SWord
-cgInputSWord s n
-  | n `elem` [8,16,32,64] = svCgInput (KBounded False n) s
-  | otherwise =
-  fail $ "Invalid codegen bit width for input variable \'" ++ s ++ "\': " ++ show n
+cgInputSWord s n = svCgInput (KBounded False n) s
+--  | n `elem` [8,16,32,64] = svCgInput (KBounded False n) s
+--  | otherwise =
+--  fail $ "Invalid codegen bit width for input variable \'" ++ s ++ "\': " ++ show n
 
 argTypes :: SharedContext s -> SharedTerm s -> IO [SharedTerm s]
 argTypes sc t = do
@@ -958,6 +959,38 @@ sbvCodeGen sc addlPrims unints path fname t = do
             | n `elem` [8,16,32,64] -> svCgReturn w
             | otherwise -> fail $ "sbvCodeGen: unsupported bitvector size: " ++ show n
             where n = intSizeOf w
-          VVector _ -> fail "sbvCodeGen: operations not yet supported"
+          VVector xv -> do
+            xs <- liftIO (mapM force $ V.toList xv)
+            case asWordList xs of
+              Just ws -> svCgOutputArr "output" ws
+              Nothing -> fail "sbvCodeGen: invalid output type, expected vector of word values"
           _ -> fail "sbvCodeGen: invalid result type: not boolean or bitvector"
   compileToC path fname codegen
+
+sbvCodeGenLLVM
+           :: SharedContext s
+           -> Map Ident SValue
+           -> [String]
+           -> Maybe FilePath
+           -> String
+           -> SharedTerm s
+           -> IO ()
+sbvCodeGenLLVM sc addlPrims unints path fname t = do
+  ty <- scTypeOf sc t
+  argTs <- argTypes sc ty
+  shapes <- traverse (asFiniteType sc) argTs
+  bval <- sbvSolveBasic (scModule sc) addlPrims unints t
+  let vars = evalState (traverse newCodeGenVars shapes) 0
+  let codegen = do
+        args <- traverse (fmap ready) vars
+        bval' <- liftIO (applyAll bval args)
+        case bval' of
+          VBool b -> svCgReturn b
+          VWord w -> svCgReturn w
+          VVector xv -> do
+            xs <- liftIO (mapM force $ V.toList xv)
+            case asWordList xs of
+              Just ws -> svCgOutputArr "output" ws
+              Nothing -> fail "sbvCodeGenLLVM: invalid output type, expected vector of word values"
+          _ -> fail "sbvCodeGenLLVM: invalid result type: not boolean or bitvector"
+  compileToLLVM path fname codegen

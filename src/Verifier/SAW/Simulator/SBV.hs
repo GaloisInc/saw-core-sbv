@@ -24,8 +24,8 @@ module Verifier.SAW.Simulator.SBV
   ( sbvSolve
   , SValue
   , Labeler(..)
+  , sbvCodeGen_definition
   , sbvCodeGen
-  , sbvCodeGenLLVM
   , toWord
   , toBool
   , module Verifier.SAW.Simulator.SBV.SWord
@@ -875,6 +875,10 @@ newCodeGenVars (FTVec n FTBit) =
   if n == 0
     then nextId <&> \_ -> return (vWord (literalSWord 0 0))
     else nextId <&> \s -> vWord <$> cgInputSWord s (fromIntegral n)
+newCodeGenVars (FTVec n (FTVec m FTBit)) = do
+  let k = KBounded False (fromIntegral m)
+  vals <- nextId <&> \s -> svCgInputArr k (fromIntegral n) s
+  return (VVector . V.fromList . fmap (ready . vWord) <$> vals)
 newCodeGenVars (FTVec n tp) = do
   vals <- V.replicateM (fromIntegral n) (newCodeGenVars tp)
   return (VVector <$> traverse (fmap ready) vals)
@@ -891,12 +895,85 @@ cgInputSWord s n = svCgInput (KBounded False n) s
 --  | otherwise =
 --  fail $ "Invalid codegen bit width for input variable \'" ++ s ++ "\': " ++ show n
 
-argTypes :: SharedContext s -> SharedTerm s -> IO [SharedTerm s]
+argTypes :: SharedContext s -> SharedTerm s -> IO ([SharedTerm s],SharedTerm s)
 argTypes sc t = do
   t' <- scWhnf sc t
   case t' of
-    (R.asPi -> Just (_, t1, t2)) -> (t1 :) <$> argTypes sc t2
-    _                            -> return []
+    (R.asPi -> Just (_, t1, t2)) -> do
+       (ts,res) <- argTypes sc t2
+       return (t1:ts, res)
+    _ -> return ([], t')
+
+sbvCodeGen_definition
+  :: SharedContext s
+  -> Map Ident SValue
+  -> [String]
+  -> SharedTerm s
+  -> IO (SBVCodeGen (), [FiniteType], FiniteType)
+sbvCodeGen_definition sc addlPrims unints t = do
+  ty <- scTypeOf sc t
+  (argTs,resTy) <- argTypes sc ty
+  shapes <- traverse (asFiniteType sc) argTs
+  resultShape <- asFiniteType sc resTy
+  bval <- sbvSolveBasic (scModule sc) addlPrims unints t
+  let vars = evalState (traverse newCodeGenVars shapes) 0
+  let codegen = do
+        args <- traverse (fmap ready) vars
+        bval' <- liftIO (applyAll bval args)
+        sbvSetResult resultShape bval'
+  return (codegen, shapes, resultShape)
+
+
+sbvSetResult :: FiniteType
+             -> SValue
+             -> SBVCodeGen ()
+sbvSetResult FTBit (VBool b) = do
+   svCgReturn b
+sbvSetResult (FTVec _n FTBit) v = do
+   w <- liftIO $ toWord v
+   svCgReturn w
+sbvSetResult ft v = do
+   void $ sbvSetOutput ft v 0
+
+
+sbvSetOutput :: FiniteType
+             -> SValue
+             -> Int
+             -> SBVCodeGen Int
+sbvSetOutput FTBit (VBool b) i = do
+   svCgOutput ("out_"++show i) b
+   return $! i+1
+sbvSetOutput (FTVec _n FTBit) v i = do
+   w <- liftIO $ toWord v
+   svCgOutput ("out_"++show i) w
+   return $! i+1
+sbvSetOutput (FTVec n t) (VVector xv) i = do
+   xs <- liftIO $ traverse force $ V.toList xv
+   unless (toInteger n == toInteger (length xs)) $
+     fail "sbvCodeGen: vector length mismatch when setting output values"
+   case asWordList xs of
+     Just ws -> do svCgOutputArr ("out_"++show i) ws
+                   return $! i+1
+     Nothing -> foldM (\i' x -> sbvSetOutput t x i') i xs
+sbvSetOutput (FTTuple []) VUnit i =
+   return i
+sbvSetOutput (FTTuple (t:ts)) (VPair l r) i = do
+   l' <- liftIO $ force l
+   r' <- liftIO $ force r
+   sbvSetOutput t l' i >>= sbvSetOutput (FTTuple ts) r'
+
+sbvSetOutput (FTRec fs) VUnit i | Map.null fs = do
+   return i
+sbvSetOutput (FTRec fs) (VField fn x rec) i = do
+   x' <- liftIO $ force x
+   case Map.lookup fn fs of
+     Just t -> do
+       let fs' = Map.delete fn fs
+       sbvSetOutput t x' i >>= sbvSetOutput (FTRec fs') rec
+     Nothing -> fail "sbvCodeGen: type mismatch when setting record output value"
+sbvSetOutput _ft _v _i = do
+   fail "sbvCode gen: type mismatch when setting output values"  
+
 
 sbvCodeGen :: SharedContext s
            -> Map Ident SValue
@@ -906,52 +983,5 @@ sbvCodeGen :: SharedContext s
            -> SharedTerm s
            -> IO ()
 sbvCodeGen sc addlPrims unints path fname t = do
-  ty <- scTypeOf sc t
-  argTs <- argTypes sc ty
-  shapes <- traverse (asFiniteType sc) argTs
-  bval <- sbvSolveBasic (scModule sc) addlPrims unints t
-  let vars = evalState (traverse newCodeGenVars shapes) 0
-  let codegen = do
-        args <- traverse (fmap ready) vars
-        bval' <- liftIO (applyAll bval args)
-        case bval' of
-          VBool b -> svCgReturn b
-          VWord w
-            | n `elem` [8,16,32,64] -> svCgReturn w
-            | otherwise -> fail $ "sbvCodeGen: unsupported bitvector size: " ++ show n
-            where n = intSizeOf w
-          VVector xv -> do
-            xs <- liftIO (mapM force $ V.toList xv)
-            case asWordList xs of
-              Just ws -> svCgOutputArr "output" ws
-              Nothing -> fail "sbvCodeGen: invalid output type, expected vector of word values"
-          _ -> fail "sbvCodeGen: invalid result type: not boolean or bitvector"
+  (codegen,_,_) <- sbvCodeGen_definition sc addlPrims unints t
   compileToC path fname codegen
-
-sbvCodeGenLLVM
-           :: SharedContext s
-           -> Map Ident SValue
-           -> [String]
-           -> Maybe FilePath
-           -> String
-           -> SharedTerm s
-           -> IO ()
-sbvCodeGenLLVM sc addlPrims unints path fname t = do
-  ty <- scTypeOf sc t
-  argTs <- argTypes sc ty
-  shapes <- traverse (asFiniteType sc) argTs
-  bval <- sbvSolveBasic (scModule sc) addlPrims unints t
-  let vars = evalState (traverse newCodeGenVars shapes) 0
-  let codegen = do
-        args <- traverse (fmap ready) vars
-        bval' <- liftIO (applyAll bval args)
-        case bval' of
-          VBool b -> svCgReturn b
-          VWord w -> svCgReturn w
-          VVector xv -> do
-            xs <- liftIO (mapM force $ V.toList xv)
-            case asWordList xs of
-              Just ws -> svCgOutputArr "output" ws
-              Nothing -> fail "sbvCodeGenLLVM: invalid output type, expected vector of word values"
-          _ -> fail "sbvCodeGenLLVM: invalid result type: not boolean or bitvector"
-  compileToLLVM path fname codegen

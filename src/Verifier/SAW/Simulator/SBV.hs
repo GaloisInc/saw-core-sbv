@@ -59,7 +59,6 @@ import qualified Verifier.SAW.Simulator.Prims as Prims
 import Verifier.SAW.SharedTerm
 import Verifier.SAW.Simulator.Value
 import Verifier.SAW.TypedAST (FieldName, Module, identName)
-
 import Verifier.SAW.FiniteValue (FiniteType(..), asFiniteType)
 
 type SValue = Value IO SBool SWord SbvExtra
@@ -98,6 +97,7 @@ constMap = Map.fromList
   , ("Prelude.bvPMul", bvPMulOp)
   , ("Prelude.bvPDiv", bvPDivOp)
   , ("Prelude.bvPMod", bvPModOp)
+  , ("Prelude.bvLg2" , Prims.bvLg2Op toWord (return . sLg2))
   -- Relations
   , ("Prelude.bvEq"  , binRel svEqual)
   , ("Prelude.bvsle" , sbinRel svLessEq)
@@ -144,7 +144,7 @@ constMap = Map.fromList
   , ("Prelude.intMax"  , Prims.intMaxOp)
   -- Vectors
   , ("Prelude.gen", Prims.genOp)
-  , ("Prelude.at", atOp)
+  , ("Prelude.atWithDefault", atWithDefaultOp)
   , ("Prelude.upd", Prims.updOp svUnpack (\x y -> return (svEqual x y)) literalSWord intSizeOf (lazyMux muxBVal))
   , ("Prelude.take", takeOp)
   , ("Prelude.drop", dropOp)
@@ -166,6 +166,7 @@ constMap = Map.fromList
   , ("Prelude.coerce", Prims.coerceOp)
   , ("Prelude.bvNat", bvNatOp)
   , ("Prelude.bvToNat", Prims.bvToNatOp)
+  , ("Prelude.error", Prims.errorOp)
   -- Overloaded
   , ("Prelude.eq", eqOp)
   ]
@@ -278,17 +279,18 @@ svAt x i = svTestBit x (intSizeOf x - 1 - i)
 svUnpack :: SWord -> Vector SBool
 svUnpack x = V.generate (intSizeOf x) (svAt x)
 
--- at :: (n :: Nat) -> (a :: sort 0) -> Vec n a -> Nat -> a;
-atOp :: SValue
-atOp =
+-- atWithDefault :: (n :: Nat) -> (a :: sort 0) -> a -> Vec n a -> Nat -> a;
+atWithDefaultOp :: SValue
+atWithDefaultOp =
   Prims.natFun $ \n -> return $
   constFun $
+  VFun $ \d -> return $
   strictFun $ \x -> return $
   strictFun $ \index ->
     case index of
       VNat i ->
         case x of
-          VVector xv -> force (Prims.vecIdx "atOp[Nat]" xv (fromIntegral i))
+          VVector xv -> force (Prims.vecIdx d xv (fromIntegral i))
           VWord xw -> return $ VBool $ svAt xw (fromIntegral i)
           _ -> fail "atOp: expected vector"
       VToNat i -> do
@@ -300,10 +302,10 @@ atOp =
                 case asWordList xs of
                   Just (w:ws) -> return $ VWord $ svSelect (w:ws) w iw
                   _ -> do
-                    selectV (lazyMux muxBVal) (fromIntegral n - 1) (force . Prims.vecIdx "atOp[ToNat]" xv) iw
+                    selectV (lazyMux muxBVal) (fromIntegral n - 1) (force . Prims.vecIdx d xv) iw
               _ -> do
                 iv <- Prims.toBits svUnpack i
-                Prims.selectV (lazyMux muxBVal) (fromIntegral n - 1) (force . Prims.vecIdx "atOp[ToNat]" xv) iv
+                Prims.selectV (lazyMux muxBVal) (fromIntegral n - 1) (force . Prims.vecIdx d xv) iv
           VWord xw -> do
             case i of
               VWord iw ->
@@ -672,6 +674,14 @@ vZipOp =
   strictFun $ \xs -> return $
   strictFun $ \ys -> return $
   VVector (V.zipWith (\x y -> ready (vTuple [x, y])) (toVector xs) (toVector ys))
+
+-- | Ceiling (log_2 x)
+sLg2 :: SWord -> SWord
+sLg2 x = go 0
+  where
+    lit n = literalSWord (intSizeOf x) n
+    go i | i < intSizeOf x = svIte (svLessEq x (lit (2^i))) (lit (toInteger i)) (go (i + 1))
+         | otherwise       = lit (toInteger i)
 
 ------------------------------------------------------------
 -- Helpers for marshalling into SValues

@@ -168,6 +168,10 @@ prims =
   , Prims.bpIntLt  = pure2 svLessThan
   , Prims.bpIntMin = undefined --pure2 min
   , Prims.bpIntMax = undefined --pure2 max
+    -- Array operations
+  , Prims.bpArrayConstant = error "bpArrayConstant unimplemented for backend"
+  , Prims.bpArrayLookup = error "bpArrayLookup unimplemented for backend"
+  , Prims.bpArrayUpdate = error "bpArrayUpdate unimplemented for backend"
   }
 
 constMap :: Map Ident SValue
@@ -680,6 +684,7 @@ newVars (FOTVec n FOTBit) =
 newVars (FOTVec n tp) = do
   (labels, vals) <- V.unzip <$> V.replicateM (fromIntegral n) (newVars tp)
   return (VecLabel labels, VVector <$> traverse (fmap ready) vals)
+newVars (FOTArray{}) = fail "FOTArray unimplemented for backend"
 newVars (FOTTuple ts) = do
   (labels, vals) <- V.unzip <$> traverse newVars (V.fromList ts)
   return (TupleLabel labels, vTuple <$> traverse (fmap ready) (V.toList vals))
@@ -707,6 +712,7 @@ newCodeGenVars checkSz (FOTVec n (FOTVec m FOTBit))
 newCodeGenVars checkSz (FOTVec n tp) = do
   vals <- V.replicateM (fromIntegral n) (newCodeGenVars checkSz tp)
   return (VVector <$> traverse (fmap ready) vals)
+newCodeGenVars _ (FOTArray{}) = fail "FOTArray unimplemented for backend"
 newCodeGenVars checkSz (FOTTuple ts) = do
   vals <- traverse (newCodeGenVars checkSz) ts
   return (vTuple <$> traverse (fmap ready) vals)

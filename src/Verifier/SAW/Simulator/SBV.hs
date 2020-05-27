@@ -170,9 +170,9 @@ prims =
   , Prims.bpIntMin = unsupportedSBVPrimitive "bpIntMin"
   , Prims.bpIntMax = unsupportedSBVPrimitive "bpIntMax"
     -- Array operations
-  , Prims.bpArrayConstant = error "bpArrayConstant unimplemented for backend"
-  , Prims.bpArrayLookup = error "bpArrayLookup unimplemented for backend"
-  , Prims.bpArrayUpdate = error "bpArrayUpdate unimplemented for backend"
+  , Prims.bpArrayConstant = unsupportedSBVPrimitive "bpArrayConstant"
+  , Prims.bpArrayLookup = unsupportedSBVPrimitive "bpArrayLookup"
+  , Prims.bpArrayUpdate = unsupportedSBVPrimitive "bpArrayUpdate"
   }
 
 unsupportedSBVPrimitive :: String -> a
